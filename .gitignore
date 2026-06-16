@@ -1,0 +1,35 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+server
+
+# Test & coverage
+*.test
+*.out
+coverage.*
+
+# Env
+.env
+.env.*
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Jekyll (docs site local build)
+docs/_site/
+docs/.jekyll-cache/
+.bundle/
+vendor/bundle/
+
+# Open-core overlay — Lexelligence-specific dev material used to exercise the
+# engine locally (seeds, prompts, compose overrides). MUST NOT be published.
+/local/
+*.lex.*
+**/seeds/lex_*
+.env.lex

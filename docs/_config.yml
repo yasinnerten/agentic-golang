@@ -1,0 +1,4 @@
+title: agentic-golang
+description: A declarative, database-driven multi-agent runtime in Go — multi-provider LLM routing with failover, two-tier semantic caching, built-in cost/latency observability, and policy-driven retries. No Python, single binary.
+theme: jekyll-theme-cayman
+show_downloads: false
