@@ -43,7 +43,10 @@ func main() {
 		"risk_level": "low",
 	}
 
-	edge := workflow.SelectNextEdge(rulesengine.NewEngine(), graph, graph.Definition.EntryNodeID, env)
+	edge, err := workflow.SelectNextEdge(rulesengine.NewEngine(), graph, graph.Definition.EntryNodeID, env)
+	if err != nil {
+		fmt.Println("condition errors:", err)
+	}
 	if edge == nil {
 		fmt.Println("terminal")
 		return

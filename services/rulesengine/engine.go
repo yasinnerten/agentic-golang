@@ -11,30 +11,37 @@ import (
 // Engine evaluates CEL expressions against a typed environment.
 type Engine struct {
 	options []cel.EnvOption
+	// declared holds the names of the statically declared variables, so
+	// EvaluateBoolWithVars does not declare them a second time.
+	declared map[string]bool
 }
 
 // NewEngine creates a rules engine with standard declarations.
 func NewEngine() *Engine {
+	staticDecls := []*exprpb.Decl{
+		decls.NewVar("env", decls.NewMapType(decls.String, decls.Dyn)),
+		decls.NewVar("input", decls.NewMapType(decls.String, decls.Dyn)),
+		decls.NewVar("state", decls.NewMapType(decls.String, decls.Dyn)),
+		decls.NewVar("answers", decls.NewMapType(decls.String, decls.Dyn)),
+		decls.NewVar("evidence", decls.NewMapType(decls.String, decls.Dyn)),
+		decls.NewVar("route", decls.String),
+		decls.NewVar("risk_level", decls.String),
+		decls.NewVar("high_risk_status", decls.String),
+		decls.NewVar("prohibited_status", decls.String),
+		decls.NewVar("transparency_status", decls.String),
+		decls.NewVar("systemic_risk_status", decls.String),
+		decls.NewVar("gpai_status", decls.String),
+		decls.NewVar("object_type", decls.String),
+		decls.NewVar("actor_role", decls.String),
+		decls.NewVar("confidence", decls.Double),
+	}
+	declared := make(map[string]bool, len(staticDecls))
+	for _, d := range staticDecls {
+		declared[d.GetName()] = true
+	}
 	return &Engine{
-		options: []cel.EnvOption{
-			cel.Declarations(
-				decls.NewVar("env", decls.NewMapType(decls.String, decls.Dyn)),
-				decls.NewVar("input", decls.NewMapType(decls.String, decls.Dyn)),
-				decls.NewVar("state", decls.NewMapType(decls.String, decls.Dyn)),
-				decls.NewVar("answers", decls.NewMapType(decls.String, decls.Dyn)),
-				decls.NewVar("evidence", decls.NewMapType(decls.String, decls.Dyn)),
-				decls.NewVar("route", decls.String),
-				decls.NewVar("risk_level", decls.String),
-				decls.NewVar("high_risk_status", decls.String),
-				decls.NewVar("prohibited_status", decls.String),
-				decls.NewVar("transparency_status", decls.String),
-				decls.NewVar("systemic_risk_status", decls.String),
-				decls.NewVar("gpai_status", decls.String),
-				decls.NewVar("object_type", decls.String),
-				decls.NewVar("actor_role", decls.String),
-				decls.NewVar("confidence", decls.Double),
-			),
-		},
+		options:  []cel.EnvOption{cel.Declarations(staticDecls...)},
+		declared: declared,
 	}
 }
 
@@ -99,7 +106,14 @@ func (e *Engine) EvaluateAny(expression string, bindings map[string]any) (any, e
 	return out.Value(), nil
 }
 
-// EvaluateBoolWithVars parses and evaluates a CEL expression with dynamically declared variables from bindings.
+// EvaluateBoolWithVars parses and evaluates a CEL expression with dynamically
+// declared variables from bindings.
+//
+// Bindings whose names are already statically declared keep their static type.
+// Declaring them again would make CEL reject every expression with an
+// "overlapping identifier" error, so one oddly typed value (say a numeric
+// risk_level) would break every condition. A value that does not fit its static
+// type now fails only the expressions that actually use it.
 func (e *Engine) EvaluateBoolWithVars(expression string, bindings map[string]any) (bool, error) {
 	if expression == "" {
 		return true, nil
@@ -107,6 +121,9 @@ func (e *Engine) EvaluateBoolWithVars(expression string, bindings map[string]any
 
 	varDcls := make([]*exprpb.Decl, 0, len(bindings))
 	for k, v := range bindings {
+		if e.declared[k] {
+			continue
+		}
 		varDcls = append(varDcls, decls.NewVar(k, celTypeOf(v)))
 	}
 

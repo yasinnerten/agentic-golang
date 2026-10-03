@@ -273,7 +273,20 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		}
 
 		// Select next edge using the accumulated env for condition evaluation.
-		nextEdge := workflow.SelectNextEdge(c.rules, graph, node.WorkflowNodeID, env)
+		nextEdge, condErr := workflow.SelectNextEdge(c.rules, graph, node.WorkflowNodeID, env)
+		if condErr != nil {
+			log.Printf("[loop] edge condition errors at node=%s: %v", node.WorkflowNodeID, condErr)
+			c.emit(session.TenantID, sessionID, "edge_condition_error", map[string]any{
+				"node_id": node.WorkflowNodeID, "error": condErr.Error(),
+			})
+		}
+		if nextEdge == nil && condErr != nil {
+			// Every outgoing edge either failed to evaluate or was false, and at
+			// least one failed. Reporting this as a normal completion would hide
+			// a broken workflow, so fail the run instead.
+			markStopped(c.db, ctx, loopRunID, "failed", "no edge could be selected: "+condErr.Error())
+			return c.sessions.UpdateStatus(ctx, sessionID, "failed")
+		}
 		if nextEdge == nil {
 			markStopped(c.db, ctx, loopRunID, "completed", "no outgoing edges")
 			c.writePerTaskDecisions(ctx, session.TenantID, sessionID, env)
