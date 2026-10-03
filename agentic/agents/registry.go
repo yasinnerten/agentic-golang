@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -98,4 +99,29 @@ func (r *Registry) CreateInstance(ctx context.Context, defID, sessionID, name st
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
 	return &i, nil
+}
+
+// GetModelPolicy loads a model policy by ID.
+func (r *Registry) GetModelPolicy(ctx context.Context, id string) (*types.ModelPolicy, error) {
+	var p types.ModelPolicy
+	var fallbacks []byte
+	var temperature sql.NullFloat64
+	var maxTokens sql.NullInt64
+	err := r.db.QueryRowContext(ctx,
+		`SELECT model_policy_id, primary_model, fallback_models, temperature, max_tokens
+		FROM public.model_policies WHERE model_policy_id = $1`, id).Scan(
+		&p.ModelPolicyID, &p.PrimaryModel, &fallbacks, &temperature, &maxTokens)
+	if err != nil {
+		return nil, fmt.Errorf("get model policy %q: %w", id, err)
+	}
+	if len(fallbacks) > 0 {
+		if err := json.Unmarshal(fallbacks, &p.FallbackModels); err != nil {
+			return nil, fmt.Errorf("model policy %q fallback_models: %w", id, err)
+		}
+	}
+	if temperature.Valid {
+		p.Temperature = &temperature.Float64
+	}
+	p.MaxTokens = int(maxTokens.Int64)
+	return &p, nil
 }

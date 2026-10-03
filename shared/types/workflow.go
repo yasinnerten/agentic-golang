@@ -1,6 +1,10 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // WorkflowDefinition is the header for a workflow graph.
 type WorkflowDefinition struct {
@@ -56,4 +60,57 @@ type WorkflowGraph struct {
 	Definition WorkflowDefinition
 	Nodes      map[string]WorkflowNode
 	Edges      []WorkflowEdge
+}
+
+// NodeConfig is the decoded form of WorkflowNode.ConfigJSON. One struct covers
+// every node type; each type reads only the fields it needs.
+type NodeConfig struct {
+	// Model selection (agent nodes). Overrides the agent's model policy.
+	Model          string   `json:"model,omitempty"`
+	FallbackModels []string `json:"fallback_models,omitempty"`
+	Temperature    *float64 `json:"temperature,omitempty"`
+	MaxTokens      int      `json:"max_tokens,omitempty"`
+
+	// Tool use (agent nodes). Tools restricts the node to the named tools;
+	// empty means every tool the executor knows. MaxToolRounds bounds the
+	// model -> tool -> model cycle.
+	Tools         []string `json:"tools,omitempty"`
+	MaxToolRounds int      `json:"max_tool_rounds,omitempty"`
+
+	// Subagent nodes: the child workflow to run, and the key the child's
+	// result is stored under in the parent's state (default: the node ID).
+	WorkflowID string `json:"workflow_id,omitempty"`
+	OutputKey  string `json:"output_key,omitempty"`
+
+	// Parallel nodes: branches run concurrently, at most MaxConcurrency at a
+	// time (0 = all at once). With FailFast the first branch error cancels
+	// the rest.
+	Branches       []BranchConfig `json:"branches,omitempty"`
+	MaxConcurrency int            `json:"max_concurrency,omitempty"`
+	FailFast       bool           `json:"fail_fast,omitempty"`
+}
+
+// BranchConfig is one branch of a parallel node. A branch runs either a single
+// agent (AgentDefinitionID, optionally with its own Model) or a whole child
+// workflow (WorkflowID) as a subagent.
+type BranchConfig struct {
+	Key               string `json:"key"`
+	AgentDefinitionID string `json:"agent_definition_id,omitempty"`
+	WorkflowID        string `json:"workflow_id,omitempty"`
+	Model             string `json:"model,omitempty"`
+	// Config is passed through as the branch node's own config_json, so a
+	// branch can set tools, fallbacks and so on.
+	Config map[string]any `json:"config,omitempty"`
+}
+
+// ParseNodeConfig decodes a node's config_json. Empty input yields a zero config.
+func ParseNodeConfig(raw []byte) (NodeConfig, error) {
+	var c NodeConfig
+	if len(raw) == 0 {
+		return c, nil
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return c, fmt.Errorf("parse node config: %w", err)
+	}
+	return c, nil
 }

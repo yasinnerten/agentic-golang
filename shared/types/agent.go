@@ -65,3 +65,13 @@ type AgentInstance struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ClosedAt          *time.Time `json:"closed_at,omitempty"`
 }
+
+// ModelPolicy is a row of public.model_policies: the model an agent uses and
+// the models to fall back to, in order, when it fails.
+type ModelPolicy struct {
+	ModelPolicyID  string   `json:"model_policy_id"`
+	PrimaryModel   string   `json:"primary_model"`
+	FallbackModels []string `json:"fallback_models"`
+	Temperature    *float64 `json:"temperature,omitempty"`
+	MaxTokens      int      `json:"max_tokens,omitempty"`
+}

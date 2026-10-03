@@ -9,26 +9,53 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
-	"github.com/yasinnerten/agentic-golang/agentic/agents"
 	"github.com/yasinnerten/agentic-golang/services/modelrouter"
 	"github.com/yasinnerten/agentic-golang/shared/types"
 )
 
+// DefinitionSource loads agent definitions and model policies.
+// *agents.Registry implements it.
+type DefinitionSource interface {
+	GetDefinition(ctx context.Context, id string) (*types.AgentDefinition, error)
+	GetModelPolicy(ctx context.Context, id string) (*types.ModelPolicy, error)
+}
+
+// Completer sends one request to a model. *modelrouter.Router implements it.
+type Completer interface {
+	Complete(ctx context.Context, req modelrouter.LLMRequest) (*modelrouter.LLMResponse, error)
+}
+
+// Defaults applied when neither the node config nor the model policy sets a value.
+const (
+	DefaultTemperature = 0.1
+	DefaultMaxTokens   = 1024
+)
+
 // LLMExecutor handles "agent" and "decision" workflow nodes.
 type LLMExecutor struct {
-	registry *agents.Registry
-	router   *modelrouter.Router
+	registry DefinitionSource
+	router   Completer
 	model    string
 }
 
+// Option configures an LLMExecutor.
+type Option func(*LLMExecutor)
+
 // NewLLMExecutor wires the executor to the agent registry and model router.
-func NewLLMExecutor(registry *agents.Registry, router *modelrouter.Router, model string) *LLMExecutor {
+// model is the fallback used when neither the node nor the agent's model
+// policy names one.
+func NewLLMExecutor(registry DefinitionSource, router Completer, model string, opts ...Option) *LLMExecutor {
 	if model == "" {
 		model = "llama3.1:8b"
 	}
-	return &LLMExecutor{registry: registry, router: router, model: model}
+	e := &LLMExecutor{registry: registry, router: router, model: model}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // CanHandle reports whether this executor runs the given node type.
@@ -53,7 +80,86 @@ func (e *LLMExecutor) Execute(ctx context.Context, node types.WorkflowNode, inpu
 	if !(node.LLMAllowed && def.CanUseLLM) {
 		return deterministic(def), nil
 	}
-	return e.runLLM(ctx, node, def, input)
+	cfg, err := types.ParseNodeConfig(node.ConfigJSON)
+	if err != nil {
+		return nil, fmt.Errorf("node %q: %w", node.WorkflowNodeID, err)
+	}
+	spec, err := e.resolveModel(ctx, def, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("node %q: %w", node.WorkflowNodeID, err)
+	}
+	return e.runLLM(ctx, node, def, spec, input)
+}
+
+// ModelSpec is the resolved model choice for one node: the models to try in
+// order, and the sampling settings.
+type ModelSpec struct {
+	Models      []string
+	Temperature float64
+	MaxTokens   int
+}
+
+// resolveModel picks the models for a node. Precedence: the node's
+// config_json "model" (with its "fallback_models"), then the agent's model
+// policy, then the executor default. Temperature and max_tokens follow the
+// same order, falling back to package defaults.
+func (e *LLMExecutor) resolveModel(ctx context.Context, def *types.AgentDefinition, cfg types.NodeConfig) (ModelSpec, error) {
+	spec := ModelSpec{Temperature: DefaultTemperature, MaxTokens: DefaultMaxTokens}
+
+	var policy *types.ModelPolicy
+	if def.DefaultModelPolicyID != nil && *def.DefaultModelPolicyID != "" {
+		p, err := e.registry.GetModelPolicy(ctx, *def.DefaultModelPolicyID)
+		if err != nil {
+			return spec, fmt.Errorf("agent %q: %w", def.AgentDefinitionID, err)
+		}
+		policy = p
+	}
+
+	switch {
+	case cfg.Model != "":
+		spec.Models = append([]string{cfg.Model}, cfg.FallbackModels...)
+	case policy != nil:
+		spec.Models = append([]string{policy.PrimaryModel}, policy.FallbackModels...)
+	default:
+		spec.Models = []string{e.model}
+	}
+
+	if policy != nil {
+		if policy.Temperature != nil {
+			spec.Temperature = *policy.Temperature
+		}
+		if policy.MaxTokens > 0 {
+			spec.MaxTokens = policy.MaxTokens
+		}
+	}
+	if cfg.Temperature != nil {
+		spec.Temperature = *cfg.Temperature
+	}
+	if cfg.MaxTokens > 0 {
+		spec.MaxTokens = cfg.MaxTokens
+	}
+	return spec, nil
+}
+
+// complete sends req to each model in spec.Models in turn and returns the
+// first success. Errors from every attempted model are joined.
+func (e *LLMExecutor) complete(ctx context.Context, spec ModelSpec, req modelrouter.LLMRequest) (*modelrouter.LLMResponse, error) {
+	var errs []error
+	for _, m := range spec.Models {
+		if err := ctx.Err(); err != nil {
+			return nil, errors.Join(append(errs, err)...)
+		}
+		req.Model = m
+		resp, err := e.router.Complete(ctx, req)
+		if err == nil {
+			if resp.Meta.Model == "" {
+				resp.Meta.Model = m
+			}
+			return resp, nil
+		}
+		errs = append(errs, fmt.Errorf("model %s: %w", m, err))
+	}
+	return nil, errors.Join(errs...)
 }
 
 // deterministic returns a rules-first result for nodes that must not call the LLM.
@@ -74,7 +180,7 @@ func deterministic(def *types.AgentDefinition) map[string]any {
 
 // runLLM prompts the model for a structured JSON result matching the agent's
 // output schema and parses it into a map the loop can route on.
-func (e *LLMExecutor) runLLM(ctx context.Context, node types.WorkflowNode, def *types.AgentDefinition, input map[string]any) (map[string]any, error) {
+func (e *LLMExecutor) runLLM(ctx context.Context, node types.WorkflowNode, def *types.AgentDefinition, spec ModelSpec, input map[string]any) (map[string]any, error) {
 	inputJSON, _ := json.Marshal(input)
 
 	sys := fmt.Sprintf(
@@ -86,11 +192,10 @@ func (e *LLMExecutor) runLLM(ctx context.Context, node types.WorkflowNode, def *
 		sys += "\nThe \"classification\" field MUST be exactly one of: prohibited, high_risk, limited_risk, minimal_risk."
 	}
 
-	resp, err := e.router.Complete(ctx, modelrouter.LLMRequest{
-		Model:       e.model,
+	resp, err := e.complete(ctx, spec, modelrouter.LLMRequest{
 		Messages:    []modelrouter.Message{{Role: "system", Content: sys}, {Role: "user", Content: "Inputs:\n" + string(inputJSON)}},
-		MaxTokens:   1024,
-		Temperature: 0.1,
+		MaxTokens:   spec.MaxTokens,
+		Temperature: spec.Temperature,
 		JSONMode:    true,
 	})
 	if err != nil {
