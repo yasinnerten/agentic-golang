@@ -211,3 +211,48 @@ func TestRecordSuccess(t *testing.T) {
 		t.Errorf("Expected 0 failures after success, got %d", statuses["recovery"].ConsecutiveFailures)
 	}
 }
+
+func TestHealthStatusesReturnsSnapshot(t *testing.T) {
+	r := NewRouter()
+	r.Register(&mockProvider{name: "p1", models: []string{"m1"}, completeErr: errors.New("boom")})
+
+	snap := r.HealthStatuses()
+	_, _ = r.Complete(context.Background(), LLMRequest{Model: "m1"})
+
+	if snap["p1"].ConsecutiveFailures != 0 {
+		t.Fatalf("snapshot changed after a later failure: %+v", snap["p1"])
+	}
+	if got := r.HealthStatuses()["p1"].ConsecutiveFailures; got != 1 {
+		t.Fatalf("expected 1 consecutive failure, got %d", got)
+	}
+}
+
+// Run with -race: reading health while calls and health checks update it must
+// not race.
+func TestHealthConcurrentAccess(t *testing.T) {
+	r := NewRouter()
+	r.Register(&mockProvider{name: "p1", models: []string{"m1"}, completeErr: errors.New("boom")})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			_, _ = r.Complete(context.Background(), LLMRequest{Model: "m1"})
+			r.RunHealthChecks(context.Background())
+		}
+	}()
+	registered := make(chan struct{})
+	go func() {
+		defer close(registered)
+		for i := 0; i < 50; i++ {
+			r.Register(&mockProvider{name: "p2", models: []string{"m2"}, healthy: true})
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		for _, h := range r.HealthStatuses() {
+			_ = h.Status
+		}
+	}
+	<-done
+	<-registered
+}

@@ -147,13 +147,16 @@ func providerServes(p Provider, model string) bool {
 	return false
 }
 
-// HealthStatuses returns the current health of all registered providers.
+// HealthStatuses returns a snapshot of the current health of all registered
+// providers. The returned values are copies, so callers can read them freely
+// while the router keeps updating its own state.
 func (r *Router) HealthStatuses() map[string]*ProviderHealth {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make(map[string]*ProviderHealth, len(r.health))
 	for k, v := range r.health {
-		out[k] = v
+		h := *v
+		out[k] = &h
 	}
 	return out
 }
@@ -172,8 +175,15 @@ func (r *Router) ProviderModels() map[string][]string {
 
 // RunHealthChecks performs health checks on all providers.
 func (r *Router) RunHealthChecks(ctx context.Context) {
-	var wg sync.WaitGroup
+	r.mu.RLock()
+	providers := make(map[string]Provider, len(r.providers))
 	for name, p := range r.providers {
+		providers[name] = p
+	}
+	r.mu.RUnlock()
+
+	var wg sync.WaitGroup
+	for name, p := range providers {
 		wg.Add(1)
 		go func(n string, prov Provider) {
 			defer wg.Done()
