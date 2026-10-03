@@ -36,7 +36,7 @@ func (b *Builder) LoadGraph(ctx context.Context, workflowID string) (*types.Work
 	// Load nodes
 	nodeRows, err := b.db.QueryContext(ctx,
 		`SELECT workflow_node_id, workflow_id, node_name, node_type, COALESCE(agent_definition_id,''),
-		input_contract_json, output_contract_json, rules_first, llm_allowed, tool_allowed,
+		input_contract_json, output_contract_json, COALESCE(config_json, '{}'::jsonb), rules_first, llm_allowed, tool_allowed,
 		COALESCE(retry_policy_id,''), COALESCE(error_policy_id,''), COALESCE(cache_policy_id,''), is_idempotent, timeout_ms, max_runtime_ms, created_at
 		FROM public.workflow_nodes WHERE workflow_id = $1`, workflowID)
 	if err != nil {
@@ -48,7 +48,7 @@ func (b *Builder) LoadGraph(ctx context.Context, workflowID string) (*types.Work
 	for nodeRows.Next() {
 		var n types.WorkflowNode
 		if err := nodeRows.Scan(&n.WorkflowNodeID, &n.WorkflowID, &n.NodeName, &n.NodeType, &n.AgentDefinitionID,
-			&n.InputContractJSON, &n.OutputContractJSON, &n.RulesFirst, &n.LLMAllowed, &n.ToolAllowed,
+			&n.InputContractJSON, &n.OutputContractJSON, &n.ConfigJSON, &n.RulesFirst, &n.LLMAllowed, &n.ToolAllowed,
 			&n.RetryPolicyID, &n.ErrorPolicyID, &n.CachePolicyID, &n.IsIdempotent, &n.TimeoutMs, &n.MaxRuntimeMs, &n.CreatedAt); err != nil {
 			return nil, err
 		}

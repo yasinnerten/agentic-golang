@@ -17,23 +17,27 @@ type WorkflowDefinition struct {
 
 // WorkflowNode is a single step in a workflow.
 type WorkflowNode struct {
-	WorkflowNodeID     string    `json:"workflow_node_id"`
-	WorkflowID         string    `json:"workflow_id"`
-	NodeName           string    `json:"node_name"`
-	NodeType           string    `json:"node_type"`
-	AgentDefinitionID  string    `json:"agent_definition_id"`
-	InputContractJSON  []byte    `json:"input_contract_json"`
-	OutputContractJSON []byte    `json:"output_contract_json"`
-	RulesFirst         bool      `json:"rules_first"`
-	LLMAllowed         bool      `json:"llm_allowed"`
-	ToolAllowed        bool      `json:"tool_allowed"`
-	RetryPolicyID      string    `json:"retry_policy_id"`
-	ErrorPolicyID      string    `json:"error_policy_id"`
-	CachePolicyID      string    `json:"cache_policy_id"`
-	IsIdempotent       bool      `json:"is_idempotent"`
-	TimeoutMs          int       `json:"timeout_ms"`
-	MaxRuntimeMs       int       `json:"max_runtime_ms"`
-	CreatedAt          time.Time `json:"created_at"`
+	WorkflowNodeID     string `json:"workflow_node_id"`
+	WorkflowID         string `json:"workflow_id"`
+	NodeName           string `json:"node_name"`
+	NodeType           string `json:"node_type"`
+	AgentDefinitionID  string `json:"agent_definition_id"`
+	InputContractJSON  []byte `json:"input_contract_json"`
+	OutputContractJSON []byte `json:"output_contract_json"`
+	// ConfigJSON holds node-type-specific settings, e.g. {"model": "..."} for an
+	// agent node, {"workflow_id": "..."} for a subagent node, or the branch list
+	// of a parallel node.
+	ConfigJSON    []byte    `json:"config_json"`
+	RulesFirst    bool      `json:"rules_first"`
+	LLMAllowed    bool      `json:"llm_allowed"`
+	ToolAllowed   bool      `json:"tool_allowed"`
+	RetryPolicyID string    `json:"retry_policy_id"`
+	ErrorPolicyID string    `json:"error_policy_id"`
+	CachePolicyID string    `json:"cache_policy_id"`
+	IsIdempotent  bool      `json:"is_idempotent"`
+	TimeoutMs     int       `json:"timeout_ms"`
+	MaxRuntimeMs  int       `json:"max_runtime_ms"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // WorkflowEdge links two workflow nodes with a CEL condition.
