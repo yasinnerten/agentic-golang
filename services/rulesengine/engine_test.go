@@ -220,3 +220,22 @@ func TestEvaluateBoolWithVarsUsesStaticTypes(t *testing.T) {
 		t.Fatal("expected true")
 	}
 }
+
+// Values decoded from JSON are float64; conditions usually use int literals.
+func TestEvaluateBoolWithVarsComparesJSONNumbersToIntLiterals(t *testing.T) {
+	eng := NewEngine()
+	for expr, want := range map[string]bool{
+		"count < 3":  true,
+		"count >= 3": false,
+		"count == 2": true,
+		"count > 1":  true,
+	} {
+		got, err := eng.EvaluateBoolWithVars(expr, map[string]any{"count": 2.0})
+		if err != nil {
+			t.Fatalf("%s: %v", expr, err)
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v", expr, got, want)
+		}
+	}
+}

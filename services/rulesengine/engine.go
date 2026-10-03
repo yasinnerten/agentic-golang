@@ -40,7 +40,13 @@ func NewEngine() *Engine {
 		declared[d.GetName()] = true
 	}
 	return &Engine{
-		options:  []cel.EnvOption{cel.Declarations(staticDecls...)},
+		options: []cel.EnvOption{
+			cel.Declarations(staticDecls...),
+			// Node outputs arrive as decoded JSON, where every number is a
+			// float64, while literals like 3 in a condition are ints. Without
+			// this, "count < 3" fails to compile against real outputs.
+			cel.CrossTypeNumericComparisons(true),
+		},
 		declared: declared,
 	}
 }
@@ -160,12 +166,11 @@ func celTypeOf(v any) *exprpb.Type {
 	switch v.(type) {
 	case bool:
 		return decls.Bool
-	case int, int32, int64:
-		return decls.Int
-	case uint, uint32, uint64:
-		return decls.Uint
-	case float32, float64:
-		return decls.Double
+	case int, int32, int64, uint, uint32, uint64, float32, float64:
+		// Numbers are declared dyn so that a JSON float64 can be compared with
+		// an int literal using any operator, including ==. CEL compares mixed
+		// numeric types by value at runtime.
+		return decls.Dyn
 	case string:
 		return decls.String
 	case []byte:
