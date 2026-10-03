@@ -1,7 +1,7 @@
 GO ?= go
 DATABASE_URL ?= postgres://agentic:agentic@localhost:5432/agentic?sslmode=disable
 
-.PHONY: fmt tidy vet test test-integration build check migrate compose-up compose-down example
+.PHONY: fmt tidy vet test test-integration build check migrate compose-up compose-down example example-agents
 
 fmt:
 	$(GO) fmt ./...
@@ -40,3 +40,8 @@ compose-down:
 
 example:
 	$(GO) run ./examples/decision-routing
+
+# Parallel agents, a subagent and tool use against the compose Postgres
+# (run make compose-up migrate first).
+example-agents:
+	DATABASE_URL="$(DATABASE_URL)" $(GO) run ./examples/research-team

@@ -446,6 +446,12 @@ func (c *Controller) executeNodeWithTryRun(ctx context.Context, tr *TryRun, node
 func (c *Controller) writePerTaskDecisions(ctx context.Context, tenantID, sessionID string, env map[string]any) {
 	quotedSchema := quoteIdentifier(dbTenantSchema(tenantID))
 
+	// Deployments without per-tenant task tables have nothing to update.
+	var tasksTable sql.NullString
+	if err := c.db.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, quotedSchema+".tasks").Scan(&tasksTable); err != nil || !tasksTable.Valid {
+		return
+	}
+
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf(
 		`SELECT task_id FROM %s.tasks WHERE session_id = $1`, quotedSchema,
 	), sessionID)

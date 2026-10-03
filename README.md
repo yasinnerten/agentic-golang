@@ -55,14 +55,21 @@ orchestration around it.** Full argument: [docs/why-go-over-python.md](docs/why-
 
 | Area | What you get |
 |---|---|
-| Orchestration | DB-driven workflow graph + CEL edge conditions + a driving loop |
-| Agents | Declarative definitions with JSON I/O schemas and capability flags |
-| LLM routing | Unified interface over 5 providers (Anthropic, Azure, Gemini, OpenAI, Ollama) with health-aware failover |
-| Semantic cache | Two-tier: exact (SHA-256) + semantic (pgvector similarity) |
-| Observability | Per-step events: tokens, cost, latency, cache hits, retries, hallucination proxy — straight into Postgres |
-| Reliability | Policy-driven retries (exponential / linear / fixed + jitter) |
+| Flows & loops | DB-stored workflow graph, CEL edge conditions, cycles bounded by iteration/runtime limits |
+| Subagents | `subagent` nodes run child workflows in child sessions; any workflow can also be exposed to a model as a tool |
+| Parallelism | `parallel` nodes fan out to agents or workflows concurrently, each with its own model |
+| Models | Model per agent (policy) or per node, with ordered fallbacks; 5 providers (Anthropic, Azure, Gemini, OpenAI, Ollama) |
+| Tools | Typed Go functions as tools (schema derived from the struct), parallel tool calls, errors fed back to the model |
+| Agents | Declarative definitions with JSON I/O schemas and capability flags; rules-first, LLM only where allowed |
+| Durability | Every session, run and node attempt is a Postgres row; runs pause for human input and resume |
+| Observability | Per-node model, latency, token usage and a full tool-call trace *(cost tracking: roadmap)* |
+| Cache | Exact-match (SHA-256) result cache *(semantic tier and executor wiring: roadmap)* |
+| Reliability | Retry policies (exponential / linear / fixed + jitter) *(not yet wired into the loop)* |
 | Structured output | Schema-validated model output with a reflective repair loop *(roadmap — see docs)* |
 | Expert prompts | Per-agent `prompt_templates` (persona + few-shot), generic and pluggable *(roadmap)* |
+
+How each of these maps to LangGraph, Google ADK, the OpenAI Agents SDK and
+others, with config examples: **[docs/patterns.md](docs/patterns.md)**.
 
 ## Where it can be used
 
@@ -82,9 +89,11 @@ The engine is domain-agnostic. Natural fits:
 git clone https://github.com/yasinnerten/agentic-golang
 cd agentic-golang
 docker compose up -d        # Postgres + pgvector
-make migrate                # apply migrations (incl. prompt_templates)
-make test
-make example                # run the neutral CEL routing example
+make migrate                # create the schema
+make test                   # unit tests
+make test-integration       # + Postgres integration tests
+make example                # CEL routing, no database needed
+make example-agents         # parallel agents, a subagent and a tool, end to end
 ```
 
 ## Status

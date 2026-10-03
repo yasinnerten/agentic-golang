@@ -49,8 +49,8 @@ Feature milestones (several inspired by AgenticGoKit and Kunal Kushwaha's
 |---|---|---|
 | v0.2 | **Structured-output validation gate** | Validate model JSON vs. the agent schema; reflective repair loop bounded by `max_iterations` |
 | v0.2 | **`prompt_templates`** loader + render | Per-agent expert prompts (persona + few-shot); mechanism generic, content pluggable |
-| v0.3 | **Tool calling + MCP** | Let agents call Go functions and discover tools via Model Context Protocol — *AgenticGoKit* |
-| v0.3 | **Orchestration patterns** | First-class sequential / parallel / DAG / loop / sub-workflow over the existing graph — *AgenticGoKit* |
+| v0.3 | **Tool calling** ✅ + MCP | Typed Go function tools on all 5 providers are done ([patterns](patterns.md#tools)); MCP discovery still to do — *AgenticGoKit, Claude Agent SDK* |
+| v0.3 | **Orchestration patterns** ✅ | Loops, `parallel` fan-out, `subagent` sub-workflows and agents-as-tools are done ([patterns](patterns.md)) — *ADK, LangGraph, OpenAI Agents SDK* |
 | v0.3 | **Tiered observability** | minimal / standard / detailed levels; optional **OTLP exporter** alongside the Postgres sink — *AgenticGoKit / Kushwaha* |
 | v0.4 | **Mermaid workflow export** | Render a session's executed graph as a Mermaid diagram — *AgenticGoKit* |
 | v0.4 | **Eval framework** | Semantic matching + LLM-as-judge with confidence scoring, building on the existing hallucination proxy — *AgenticGoKit* |

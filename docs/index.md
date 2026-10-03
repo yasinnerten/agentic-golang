@@ -14,6 +14,8 @@ observability, and policy-driven retries — in one static binary, next to Postg
 
 - **[Why Go over Python (beyond speed)](why-go-over-python.md)** — the general
   engineering case for Go as an orchestration/serving layer, not a benchmark.
+- **[Flows, loops, subagents and tools](patterns.md)** — what the engine can
+  orchestrate, which framework each pattern comes from, and the config for it.
 - **[Architecture & roadmap](architecture.md)** — components, the core flows
   (LLM reasoning, semantic cache, observability), and what's next.
 - **[Prompt templates](prompt-templates.md)** — how agents become *experts on their
