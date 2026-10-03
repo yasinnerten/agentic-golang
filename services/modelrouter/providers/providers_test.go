@@ -166,3 +166,13 @@ func TestGeminiKeepsKeyOutOfURL(t *testing.T) {
 		t.Fatalf("API key leaked into error: %v", err)
 	}
 }
+
+func captureServerStatus(t *testing.T, status int, reply string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}

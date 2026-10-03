@@ -52,25 +52,22 @@ func (a *AnthropicProvider) HealthCheck(ctx context.Context) error {
 }
 
 func (a *AnthropicProvider) Complete(ctx context.Context, req modelrouter.LLMRequest) (*modelrouter.LLMResponse, error) {
-	// The Messages API rejects role "system" inside messages; system prompts
-	// go in the top-level "system" field instead.
-	var system []string
-	messages := make([]map[string]string, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		if m.Role == "system" {
-			system = append(system, m.Content)
-			continue
-		}
-		messages = append(messages, map[string]string{"role": m.Role, "content": m.Content})
-	}
+	system, messages := toAnthropicMessages(req.Messages)
 	payload := map[string]any{
 		"model":       req.Model,
 		"messages":    messages,
 		"max_tokens":  req.MaxTokens,
 		"temperature": req.Temperature,
 	}
-	if len(system) > 0 {
-		payload["system"] = strings.Join(system, "\n\n")
+	if system != "" {
+		payload["system"] = system
+	}
+	if len(req.Tools) > 0 {
+		tools := make([]map[string]any, len(req.Tools))
+		for i, t := range req.Tools {
+			tools[i] = map[string]any{"name": t.Name, "description": t.Description, "input_schema": schemaOrEmpty(t.Parameters)}
+		}
+		payload["tools"] = tools
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -92,12 +89,16 @@ func (a *AnthropicProvider) Complete(ctx context.Context, req modelrouter.LLMReq
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic status %d", resp.StatusCode)
+		return nil, statusError("anthropic", resp)
 	}
 
 	var result struct {
 		Content []struct {
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 		Usage struct {
 			InputTokens  int `json:"input_tokens"`
@@ -111,8 +112,7 @@ func (a *AnthropicProvider) Complete(ctx context.Context, req modelrouter.LLMReq
 		return nil, fmt.Errorf("no content returned")
 	}
 
-	return &modelrouter.LLMResponse{
-		Content: result.Content[0].Text,
+	out := &modelrouter.LLMResponse{
 		Meta: modelrouter.LLMMeta{
 			Model:        req.Model,
 			Provider:     a.Name(),
@@ -120,5 +120,65 @@ func (a *AnthropicProvider) Complete(ctx context.Context, req modelrouter.LLMReq
 			OutputTokens: result.Usage.OutputTokens,
 			TotalTokens:  result.Usage.InputTokens + result.Usage.OutputTokens,
 		},
-	}, nil
+	}
+	var text []string
+	for _, block := range result.Content {
+		switch block.Type {
+		case "tool_use":
+			out.ToolCalls = append(out.ToolCalls, modelrouter.ToolCall{ID: block.ID, Name: block.Name, Arguments: argsOrEmpty(block.Input)})
+		case "text", "":
+			text = append(text, block.Text)
+		}
+	}
+	out.Content = strings.Join(text, "")
+	return out, nil
+}
+
+// toAnthropicMessages converts unified messages to the Messages API shape.
+// System prompts move to the top-level "system" field (the API rejects role
+// "system" in messages). Tool calls become tool_use blocks on the assistant
+// turn; tool results become tool_result blocks, and consecutive results are
+// grouped into one user turn as the API requires.
+func toAnthropicMessages(msgs []modelrouter.Message) (string, []map[string]any) {
+	var system []string
+	var out []map[string]any
+	for _, m := range msgs {
+		switch {
+		case m.Role == "system":
+			system = append(system, m.Content)
+
+		case m.Role == "tool":
+			block := map[string]any{"type": "tool_result", "tool_use_id": m.ToolCallID, "content": m.Content}
+			if n := len(out); n > 0 && out[n-1]["role"] == "user" {
+				if blocks, ok := out[n-1]["content"].([]map[string]any); ok && isToolResults(blocks) {
+					out[n-1]["content"] = append(blocks, block)
+					continue
+				}
+			}
+			out = append(out, map[string]any{"role": "user", "content": []map[string]any{block}})
+
+		case m.Role == "assistant" && len(m.ToolCalls) > 0:
+			var blocks []map[string]any
+			if m.Content != "" {
+				blocks = append(blocks, map[string]any{"type": "text", "text": m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				blocks = append(blocks, map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": argsOrEmpty(tc.Arguments)})
+			}
+			out = append(out, map[string]any{"role": "assistant", "content": blocks})
+
+		default:
+			out = append(out, map[string]any{"role": m.Role, "content": m.Content})
+		}
+	}
+	return strings.Join(system, "\n\n"), out
+}
+
+func isToolResults(blocks []map[string]any) bool {
+	for _, b := range blocks {
+		if b["type"] != "tool_result" {
+			return false
+		}
+	}
+	return true
 }

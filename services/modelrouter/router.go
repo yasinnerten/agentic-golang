@@ -2,6 +2,7 @@ package modelrouter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -15,18 +16,46 @@ type LLMRequest struct {
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 	Temperature float64   `json:"temperature,omitempty"`
 	JSONMode    bool      `json:"json_mode,omitempty"`
+	// Tools the model may call. Providers translate these into their own
+	// function-calling format.
+	Tools []ToolSpec `json:"tools,omitempty"`
 }
 
 // Message represents a single turn.
+//
+// Tool use takes two extra shapes:
+//   - Role "assistant" with ToolCalls: the model asked for tools to run.
+//   - Role "tool" with ToolCallID and ToolName: the result of one call, in
+//     Content.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolName   string     `json:"tool_name,omitempty"`
+}
+
+// ToolSpec describes a tool to the model. Parameters is a JSON Schema object.
+type ToolSpec struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// ToolCall is one tool invocation requested by the model. Arguments is a JSON
+// object. Providers that do not assign call IDs get generated ones.
+type ToolCall struct {
+	ID        string          `json:"id"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 // LLMResponse is the unified response format.
 type LLMResponse struct {
-	Content string  `json:"content"`
-	Meta    LLMMeta `json:"meta"`
+	Content string `json:"content"`
+	// ToolCalls is non-empty when the model wants tools run before it answers.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Meta      LLMMeta    `json:"meta"`
 }
 
 // LLMMeta contains metadata about the response.

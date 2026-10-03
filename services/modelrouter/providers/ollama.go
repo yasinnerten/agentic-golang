@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/yasinnerten/agentic-golang/services/modelrouter"
 )
 
@@ -49,10 +51,22 @@ func (o *OllamaProvider) HealthCheck(ctx context.Context) error {
 }
 
 func (o *OllamaProvider) Complete(ctx context.Context, req modelrouter.LLMRequest) (*modelrouter.LLMResponse, error) {
-	// Convert messages to Ollama chat format
-	messages := make([]map[string]string, len(req.Messages))
+	// Convert messages to Ollama chat format. Tool-call arguments are JSON
+	// objects (not strings) and results are role "tool" turns naming the tool.
+	messages := make([]map[string]any, len(req.Messages))
 	for i, m := range req.Messages {
-		messages[i] = map[string]string{"role": m.Role, "content": m.Content}
+		msg := map[string]any{"role": m.Role, "content": m.Content}
+		if m.Role == "tool" && m.ToolName != "" {
+			msg["tool_name"] = m.ToolName
+		}
+		if len(m.ToolCalls) > 0 {
+			calls := make([]map[string]any, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				calls[j] = map[string]any{"function": map[string]any{"name": tc.Name, "arguments": argsOrEmpty(tc.Arguments)}}
+			}
+			msg["tool_calls"] = calls
+		}
+		messages[i] = msg
 	}
 	options := map[string]any{"temperature": req.Temperature}
 	if req.MaxTokens > 0 {
@@ -67,6 +81,9 @@ func (o *OllamaProvider) Complete(ctx context.Context, req modelrouter.LLMReques
 	if req.JSONMode {
 		// Constrain Ollama to emit valid JSON so structured node output parses.
 		payload["format"] = "json"
+	}
+	if len(req.Tools) > 0 {
+		payload["tools"] = toOpenAITools(req.Tools)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -86,12 +103,18 @@ func (o *OllamaProvider) Complete(ctx context.Context, req modelrouter.LLMReques
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama status %d", resp.StatusCode)
+		return nil, statusError("ollama", resp)
 	}
 
 	var result struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Function struct {
+					Name      string          `json:"name"`
+					Arguments json.RawMessage `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"message"`
 		PromptEvalCount int `json:"prompt_eval_count"`
 		EvalCount       int `json:"eval_count"`
@@ -100,7 +123,7 @@ func (o *OllamaProvider) Complete(ctx context.Context, req modelrouter.LLMReques
 		return nil, err
 	}
 
-	return &modelrouter.LLMResponse{
+	out := &modelrouter.LLMResponse{
 		Content: result.Message.Content,
 		Meta: modelrouter.LLMMeta{
 			Model:        req.Model,
@@ -109,5 +132,12 @@ func (o *OllamaProvider) Complete(ctx context.Context, req modelrouter.LLMReques
 			OutputTokens: result.EvalCount,
 			TotalTokens:  result.PromptEvalCount + result.EvalCount,
 		},
-	}, nil
+	}
+	for _, tc := range result.Message.ToolCalls {
+		// Ollama does not assign call IDs; generate them.
+		out.ToolCalls = append(out.ToolCalls, modelrouter.ToolCall{
+			ID: "call_" + uuid.NewString(), Name: tc.Function.Name, Arguments: argsOrEmpty(tc.Function.Arguments),
+		})
+	}
+	return out, nil
 }
