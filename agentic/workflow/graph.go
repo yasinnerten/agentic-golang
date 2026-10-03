@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/yasinnerten/agentic-golang/services/rulesengine"
@@ -90,18 +91,29 @@ func (b *Builder) LoadGraph(ctx context.Context, workflowID string) (*types.Work
 // pre-sorted by priority DESC. An empty condition is treated as always-true. A
 // condition that fails to compile/evaluate (e.g. it references a variable not
 // present in env) is treated as not-matching and skipped, so an unrelated edge
-// can never be taken by accident. Returns nil when nothing matches (the loop
-// then treats the node as terminal).
-func SelectNextEdge(eng *rulesengine.Engine, g *types.WorkflowGraph, nodeID string, env map[string]any) *types.WorkflowEdge {
+// can never be taken by accident.
+//
+// The error joins every condition failure seen before the chosen edge (or
+// across all candidates, when none matched) so callers can report broken
+// conditions instead of having them vanish. It is nil when every evaluated
+// condition compiled and ran cleanly. The edge is nil when nothing matched (the
+// loop then treats the node as terminal).
+func SelectNextEdge(eng *rulesengine.Engine, g *types.WorkflowGraph, nodeID string, env map[string]any) (*types.WorkflowEdge, error) {
 	candidates := outgoing(g, nodeID)
+	var errs []error
 	for i := range candidates {
 		ok, err := eng.EvaluateBoolWithVars(candidates[i].ConditionExpression, env)
-		if err != nil || !ok {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("edge %s (%s -> %s): %w",
+				candidates[i].WorkflowEdgeID, candidates[i].FromNodeID, candidates[i].ToNodeID, err))
 			continue
 		}
-		return &candidates[i]
+		if !ok {
+			continue
+		}
+		return &candidates[i], errors.Join(errs...)
 	}
-	return nil
+	return nil, errors.Join(errs...)
 }
 
 func outgoing(g *types.WorkflowGraph, nodeID string) []types.WorkflowEdge {

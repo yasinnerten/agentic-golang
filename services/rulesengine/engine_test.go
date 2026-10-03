@@ -188,3 +188,35 @@ func TestEvaluateAny(t *testing.T) {
 		t.Errorf("Expected true, got %v", result)
 	}
 }
+
+// A binding that shares a name with a static declaration must not break
+// expressions that never mention it.
+func TestEvaluateBoolWithVarsStaticNameDoesNotPoisonOtherExpressions(t *testing.T) {
+	eng := NewEngine()
+	bindings := map[string]any{"risk_level": 3.0, "approved": true}
+
+	ok, err := eng.EvaluateBoolWithVars("approved == true", bindings)
+	if err != nil {
+		t.Fatalf("unrelated expression failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected approved == true to be true")
+	}
+
+	// The expression that does use the mistyped value is simply not satisfied.
+	if ok, _ := eng.EvaluateBoolWithVars("risk_level == 'low'", bindings); ok {
+		t.Fatal("expected risk_level == 'low' to be false for a numeric risk_level")
+	}
+}
+
+func TestEvaluateBoolWithVarsUsesStaticTypes(t *testing.T) {
+	eng := NewEngine()
+	ok, err := eng.EvaluateBoolWithVars("confidence >= 0.8 && risk_level == 'low'",
+		map[string]any{"confidence": 0.91, "risk_level": "low"})
+	if err != nil {
+		t.Fatalf("EvaluateBoolWithVars failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected true")
+	}
+}

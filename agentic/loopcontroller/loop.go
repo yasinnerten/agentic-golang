@@ -273,7 +273,20 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		}
 
 		// Select next edge using the accumulated env for condition evaluation.
-		nextEdge := workflow.SelectNextEdge(c.rules, graph, node.WorkflowNodeID, env)
+		nextEdge, condErr := workflow.SelectNextEdge(c.rules, graph, node.WorkflowNodeID, env)
+		if condErr != nil {
+			log.Printf("[loop] edge condition errors at node=%s: %v", node.WorkflowNodeID, condErr)
+			c.emit(session.TenantID, sessionID, "edge_condition_error", map[string]any{
+				"node_id": node.WorkflowNodeID, "error": condErr.Error(),
+			})
+		}
+		if nextEdge == nil && condErr != nil {
+			// Every outgoing edge either failed to evaluate or was false, and at
+			// least one failed. Reporting this as a normal completion would hide
+			// a broken workflow, so fail the run instead.
+			markStopped(c.db, ctx, loopRunID, "failed", "no edge could be selected: "+condErr.Error())
+			return c.sessions.UpdateStatus(ctx, sessionID, "failed")
+		}
 		if nextEdge == nil {
 			markStopped(c.db, ctx, loopRunID, "completed", "no outgoing edges")
 			c.writePerTaskDecisions(ctx, session.TenantID, sessionID, env)
@@ -392,8 +405,7 @@ func (c *Controller) executeNodeWithTryRun(ctx context.Context, tr *TryRun, node
 // fabricated as compliant. Fabricating "comply" for work that never ran would
 // silently fake compliance results.
 func (c *Controller) writePerTaskDecisions(ctx context.Context, tenantID, sessionID string, env map[string]any) {
-	schemaName := dbTenantSchema(tenantID)
-	quotedSchema := fmt.Sprintf(`"%s"`, schemaName)
+	quotedSchema := quoteIdentifier(dbTenantSchema(tenantID))
 
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf(
 		`SELECT task_id FROM %s.tasks WHERE session_id = $1`, quotedSchema,
@@ -511,6 +523,17 @@ func extractResultSummary(env map[string]any) string {
 
 func dbTenantSchema(tenantID string) string {
 	return "tenant_" + tenantID
+}
+
+// quoteIdentifier quotes name for use as a Postgres identifier. Embedded double
+// quotes are doubled so a tenant ID cannot close the quoted identifier and
+// inject SQL. Postgres identifiers cannot contain NUL, so anything from the
+// first NUL onward is dropped.
+func quoteIdentifier(name string) string {
+	if i := strings.IndexByte(name, 0); i >= 0 {
+		name = name[:i]
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 func markStopped(db *sql.DB, ctx context.Context, loopRunID, status, reason string) {

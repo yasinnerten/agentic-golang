@@ -6,22 +6,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/yasinnerten/agentic-golang/services/modelrouter"
 )
 
+const anthropicBaseURL = "https://api.anthropic.com"
+
 // AnthropicProvider calls the Anthropic API.
 type AnthropicProvider struct {
-	apiKey string
-	client *http.Client
+	apiKey  string
+	baseURL string
+	client  *http.Client
 }
 
 // NewAnthropicProvider creates an Anthropic provider.
 func NewAnthropicProvider(apiKey string) *AnthropicProvider {
 	return &AnthropicProvider{
-		apiKey: apiKey,
-		client: &http.Client{Timeout: 60 * time.Second},
+		apiKey:  apiKey,
+		baseURL: anthropicBaseURL,
+		client:  &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -29,7 +34,7 @@ func (a *AnthropicProvider) Name() string     { return "anthropic" }
 func (a *AnthropicProvider) Models() []string { return []string{"claude-sonnet-4", "claude-opus-4"} }
 
 func (a *AnthropicProvider) HealthCheck(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.anthropic.com/v1/models", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", a.baseURL+"/v1/models", nil)
 	if err != nil {
 		return err
 	}
@@ -47,20 +52,32 @@ func (a *AnthropicProvider) HealthCheck(ctx context.Context) error {
 }
 
 func (a *AnthropicProvider) Complete(ctx context.Context, req modelrouter.LLMRequest) (*modelrouter.LLMResponse, error) {
-	messages := make([]map[string]string, len(req.Messages))
-	for i, m := range req.Messages {
-		messages[i] = map[string]string{"role": m.Role, "content": m.Content}
+	// The Messages API rejects role "system" inside messages; system prompts
+	// go in the top-level "system" field instead.
+	var system []string
+	messages := make([]map[string]string, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			system = append(system, m.Content)
+			continue
+		}
+		messages = append(messages, map[string]string{"role": m.Role, "content": m.Content})
 	}
-	body, err := json.Marshal(map[string]any{
-		"model":      req.Model,
-		"messages":   messages,
-		"max_tokens": req.MaxTokens,
-	})
+	payload := map[string]any{
+		"model":       req.Model,
+		"messages":    messages,
+		"max_tokens":  req.MaxTokens,
+		"temperature": req.Temperature,
+	}
+	if len(system) > 0 {
+		payload["system"] = strings.Join(system, "\n\n")
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", a.baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

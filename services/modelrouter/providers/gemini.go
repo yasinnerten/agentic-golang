@@ -11,17 +11,21 @@ import (
 	"github.com/yasinnerten/agentic-golang/services/modelrouter"
 )
 
+const geminiBaseURL = "https://generativelanguage.googleapis.com"
+
 // GeminiProvider calls the Google Gemini API.
 type GeminiProvider struct {
-	apiKey string
-	client *http.Client
+	apiKey  string
+	baseURL string
+	client  *http.Client
 }
 
 // NewGeminiProvider creates a Gemini provider.
 func NewGeminiProvider(apiKey string) *GeminiProvider {
 	return &GeminiProvider{
-		apiKey: apiKey,
-		client: &http.Client{Timeout: 60 * time.Second},
+		apiKey:  apiKey,
+		baseURL: geminiBaseURL,
+		client:  &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -29,11 +33,13 @@ func (g *GeminiProvider) Name() string     { return "gemini" }
 func (g *GeminiProvider) Models() []string { return []string{"gemini-2.5-flash", "gemini-pro"} }
 
 func (g *GeminiProvider) HealthCheck(ctx context.Context) error {
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models?key=%s", g.apiKey)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// The key goes in a header, not the query string: http.Client errors embed
+	// the full request URL, which would leak the key into logs.
+	req, err := http.NewRequestWithContext(ctx, "GET", g.baseURL+"/v1beta/models", nil)
 	if err != nil {
 		return err
 	}
+	req.Header.Set("x-goog-api-key", g.apiKey)
 	resp, err := g.client.Do(req)
 	if err != nil {
 		return err
@@ -46,30 +52,45 @@ func (g *GeminiProvider) HealthCheck(ctx context.Context) error {
 }
 
 func (g *GeminiProvider) Complete(ctx context.Context, req modelrouter.LLMRequest) (*modelrouter.LLMResponse, error) {
-	contents := make([]map[string]any, len(req.Messages))
-	for i, m := range req.Messages {
-		contents[i] = map[string]any{
+	// Gemini only accepts the roles "user" and "model" in contents; system
+	// prompts go in systemInstruction.
+	var system []map[string]string
+	contents := make([]map[string]any, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		switch m.Role {
+		case "system":
+			system = append(system, map[string]string{"text": m.Content})
+			continue
+		case "assistant":
+			m.Role = "model"
+		}
+		contents = append(contents, map[string]any{
 			"role":  m.Role,
 			"parts": []map[string]string{{"text": m.Content}},
-		}
+		})
 	}
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"contents": contents,
 		"generationConfig": map[string]any{
 			"maxOutputTokens": req.MaxTokens,
 			"temperature":     req.Temperature,
 		},
-	})
+	}
+	if len(system) > 0 {
+		payload["systemInstruction"] = map[string]any{"parts": system}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", req.Model, g.apiKey)
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", g.baseURL, req.Model)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-goog-api-key", g.apiKey)
 
 	resp, err := g.client.Do(httpReq)
 	if err != nil {
