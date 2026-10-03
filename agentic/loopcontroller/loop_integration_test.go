@@ -20,8 +20,19 @@ type funcExecutor struct {
 }
 
 func (f funcExecutor) CanHandle(t string) bool { return t == f.nodeType }
-func (f funcExecutor) Execute(ctx context.Context, node types.WorkflowNode, input map[string]any, _ string) (map[string]any, error) {
-	return f.fn(ctx, node, input)
+func (f funcExecutor) Execute(ctx context.Context, node types.WorkflowNode, input map[string]any, sessionID string) (map[string]any, error) {
+	return f.fn(withTestSession(ctx, sessionID), node, input)
+}
+
+type testSessionKey struct{}
+
+func withTestSession(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, testSessionKey{}, id)
+}
+
+func testSession(ctx context.Context) string {
+	s, _ := ctx.Value(testSessionKey{}).(string)
+	return s
 }
 
 type testNode struct{ id, nodeType, config string }

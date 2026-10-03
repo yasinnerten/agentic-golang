@@ -35,6 +35,8 @@ type Controller struct {
 	obsRecorder  ObservabilityRecorder
 	executors    []NodeExecutor
 	rules        *rulesengine.Engine
+
+	maxSubagentDepth int
 }
 
 func NewController(db *sql.DB, sm *sessions.Manager, ms *memory.Store, wb *workflow.Builder) *Controller {
@@ -72,22 +74,29 @@ func (c *Controller) SetRules(eng *rulesengine.Engine) {
 // into session memory, and runs the loop. This is the entry point callers use
 // to actually execute a workflow (a bare session has no workflow attached).
 func (c *Controller) StartWorkflow(ctx context.Context, sessionID, workflowID string, input map[string]any, cfg LoopConfig) error {
+	_, err := c.RunWorkflow(ctx, sessionID, workflowID, input, cfg)
+	return err
+}
+
+// RunWorkflow is StartWorkflow that also reports how the run ended: its final
+// status, the reason it stopped and the accumulated state.
+func (c *Controller) RunWorkflow(ctx context.Context, sessionID, workflowID string, input map[string]any, cfg LoopConfig) (*RunResult, error) {
 	session, err := c.sessions.Get(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("load session: %w", err)
+		return nil, fmt.Errorf("load session: %w", err)
 	}
 	if workflowID != "" {
 		if err := c.sessions.AttachWorkflow(ctx, sessionID, workflowID); err != nil {
-			return fmt.Errorf("attach workflow: %w", err)
+			return nil, fmt.Errorf("attach workflow: %w", err)
 		}
 	}
 	if len(input) > 0 {
 		if err := c.memoryStore.Put(ctx, session.TenantID, sessionID, "", memory.MemorySession,
 			"loop_input", input, "loop_start", "", 1.0, 0); err != nil {
-			return fmt.Errorf("seed loop input: %w", err)
+			return nil, fmt.Errorf("seed loop input: %w", err)
 		}
 	}
-	return c.Run(ctx, sessionID, cfg)
+	return c.run(ctx, sessionID, cfg)
 }
 
 func (c *Controller) emit(tenantID, sessionID, eventType string, payload map[string]any) {
@@ -115,10 +124,21 @@ type LoopConfig struct {
 	TimeoutMs     int
 }
 
-// Run starts (or resumes) the loop for a session.
+// Run starts (or resumes) the loop for a session. It returns an error only for
+// infrastructure failures; a node failure ends the run with session status
+// "failed" and a nil error. Use RunWorkflow to see how the run ended.
 func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) error {
-	if c.rules == nil {
-		c.rules = rulesengine.NewEngine()
+	_, err := c.run(ctx, sessionID, cfg)
+	return err
+}
+
+// run drives the loop and reports how it ended.
+func (c *Controller) run(ctx context.Context, sessionID string, cfg LoopConfig) (*RunResult, error) {
+	// Runs can execute concurrently (parallel branches start child runs), so
+	// never write to the controller here.
+	rules := c.rules
+	if rules == nil {
+		rules = rulesengine.NewEngine()
 	}
 	if cfg.MaxIterations == 0 {
 		cfg.MaxIterations = DefaultMaxIterations
@@ -134,7 +154,7 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 	// below (both tables require a non-null tenant_id).
 	session, err := c.sessions.Get(ctx, sessionID)
 	if err != nil {
-		return fmt.Errorf("load session: %w", err)
+		return nil, fmt.Errorf("load session: %w", err)
 	}
 
 	// Create loop run record
@@ -144,7 +164,7 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		VALUES ($1, $2, $3, 'running', $4, $5, $6, NOW())`,
 		loopRunID, sessionID, session.TenantID, cfg.MaxIterations, cfg.MaxRuntimeMs, cfg.TimeoutMs)
 	if err != nil {
-		return fmt.Errorf("create loop run: %w", err)
+		return nil, fmt.Errorf("create loop run: %w", err)
 	}
 
 	c.emit(session.TenantID, sessionID, "loop_started", map[string]any{
@@ -157,7 +177,7 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		graph, err = c.graphBuilder.LoadGraph(ctx, session.CurrentWorkflowID)
 		if err != nil {
 			markStopped(c.db, ctx, loopRunID, "failed", "load graph: "+err.Error())
-			return err
+			return nil, err
 		}
 	}
 
@@ -175,6 +195,16 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		}
 	}
 
+	// finish records the final session status and reports the run's result.
+	finish := func(status, reason string) (*RunResult, error) {
+		res := &RunResult{SessionID: sessionID, LoopRunID: loopRunID, Status: status, Reason: reason, Output: env}
+		return res, c.sessions.UpdateStatus(ctx, sessionID, status)
+	}
+
+	// Nested runs (subagents, agent tools) read the loop limits and depth
+	// from the context.
+	ctx = withRunInfo(ctx, runInfo{cfg: cfg, depth: runDepth(ctx), loopRunID: loopRunID})
+
 	iteration := 0
 	start := time.Now()
 	maxDuration := time.Duration(cfg.MaxRuntimeMs) * time.Millisecond
@@ -187,20 +217,20 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		if cur, err := c.sessions.Get(ctx, sessionID); err == nil && cur.Status == "paused" {
 			c.emit(session.TenantID, sessionID, "loop_paused", map[string]any{"iterations": iteration})
 			markStopped(c.db, ctx, loopRunID, "paused", "paused by user")
-			return nil
+			return &RunResult{SessionID: sessionID, LoopRunID: loopRunID, Status: "paused", Reason: "paused by user", Output: env}, nil
 		}
 
 		if iteration >= cfg.MaxIterations {
 			c.emit(session.TenantID, sessionID, "loop_completed", map[string]any{"reason": "max_iterations", "iterations": iteration})
 			markStopped(c.db, ctx, loopRunID, "completed", "max iterations reached")
 			c.writePerTaskDecisions(ctx, session.TenantID, sessionID, env)
-			return c.sessions.UpdateStatus(ctx, sessionID, "completed")
+			return finish("completed", "max iterations reached")
 		}
 		if time.Since(start) > maxDuration {
 			c.emit(session.TenantID, sessionID, "loop_completed", map[string]any{"reason": "timeout", "iterations": iteration})
 			markStopped(c.db, ctx, loopRunID, "timed_out", "max runtime exceeded")
 			c.writePerTaskDecisions(ctx, session.TenantID, sessionID, env)
-			return c.sessions.UpdateStatus(ctx, sessionID, "timed_out")
+			return finish("timed_out", "max runtime exceeded")
 		}
 
 		// Determine current node
@@ -211,13 +241,13 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		if graph == nil || currentNodeID == "" {
 			markStopped(c.db, ctx, loopRunID, "completed", "no current node or graph")
 			c.writePerTaskDecisions(ctx, session.TenantID, sessionID, env)
-			return c.sessions.UpdateStatus(ctx, sessionID, "completed")
+			return finish("completed", "no current node or graph")
 		}
 
 		node, ok := graph.Nodes[currentNodeID]
 		if !ok {
 			markStopped(c.db, ctx, loopRunID, "failed", "node not found: "+currentNodeID)
-			return fmt.Errorf("node not found: %s", currentNodeID)
+			return nil, fmt.Errorf("node not found: %s", currentNodeID)
 		}
 
 		log.Printf("[loop] session=%s iteration=%d node=%s type=%s", sessionID, iteration, node.WorkflowNodeID, node.NodeType)
@@ -230,7 +260,7 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		input, err := c.buildNodeInput(ctx, sessionID, node, env)
 		if err != nil {
 			markStopped(c.db, ctx, loopRunID, "failed", "build input: "+err.Error())
-			return err
+			return nil, err
 		}
 
 		// Execute try-run wrapper
@@ -254,7 +284,7 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 			})
 			// For Phase 2 skeleton: mark failed and stop
 			markStopped(c.db, ctx, loopRunID, "failed", execErr.Error())
-			return c.sessions.UpdateStatus(ctx, sessionID, "failed")
+			return finish("failed", fmt.Sprintf("node %s: %v", node.WorkflowNodeID, execErr))
 		}
 
 		// Store output in memory and fold it into the accumulated env so later
@@ -273,7 +303,7 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		}
 
 		// Select next edge using the accumulated env for condition evaluation.
-		nextEdge, condErr := workflow.SelectNextEdge(c.rules, graph, node.WorkflowNodeID, env)
+		nextEdge, condErr := workflow.SelectNextEdge(rules, graph, node.WorkflowNodeID, env)
 		if condErr != nil {
 			log.Printf("[loop] edge condition errors at node=%s: %v", node.WorkflowNodeID, condErr)
 			c.emit(session.TenantID, sessionID, "edge_condition_error", map[string]any{
@@ -285,19 +315,19 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 			// least one failed. Reporting this as a normal completion would hide
 			// a broken workflow, so fail the run instead.
 			markStopped(c.db, ctx, loopRunID, "failed", "no edge could be selected: "+condErr.Error())
-			return c.sessions.UpdateStatus(ctx, sessionID, "failed")
+			return finish("failed", "no edge could be selected: "+condErr.Error())
 		}
 		if nextEdge == nil {
 			markStopped(c.db, ctx, loopRunID, "completed", "no outgoing edges")
 			c.writePerTaskDecisions(ctx, session.TenantID, sessionID, env)
-			return c.sessions.UpdateStatus(ctx, sessionID, "completed")
+			return finish("completed", "no outgoing edges")
 		}
 
 		// Update session to next node
 		nextNodeID := nextEdge.ToNodeID
 		if err := c.sessions.UpdateCurrentNode(ctx, sessionID, session.CurrentWorkflowID, nextNodeID); err != nil {
 			markStopped(c.db, ctx, loopRunID, "failed", "update node: "+err.Error())
-			return err
+			return nil, err
 		}
 		session.CurrentNodeID = nextNodeID
 
@@ -311,7 +341,7 @@ func (c *Controller) Run(ctx context.Context, sessionID string, cfg LoopConfig) 
 		// Pause for human input if node requires it
 		if node.NodeType == "human_input" {
 			markStopped(c.db, ctx, loopRunID, "waiting_for_user", "node requires human input")
-			return c.sessions.UpdateStatus(ctx, sessionID, "waiting_for_user")
+			return finish("waiting_for_user", "node requires human input")
 		}
 	}
 }
@@ -364,7 +394,16 @@ func (c *Controller) executeNodeWithTryRun(ctx context.Context, tr *TryRun, node
 		}
 	}
 	if !handled {
-		err = fmt.Errorf("no executor registered for node type %q", node.NodeType)
+		// Orchestration node types are built in; a registered executor for the
+		// same type (checked above) takes precedence.
+		switch node.NodeType {
+		case NodeTypeSubagent:
+			output, err = c.runSubagentNode(ctx, node, input, sessionID)
+		case NodeTypeParallel:
+			output, err = c.runParallelNode(ctx, node, input, sessionID)
+		default:
+			err = fmt.Errorf("no executor registered for node type %q", node.NodeType)
+		}
 	}
 
 	// Record completion
