@@ -405,8 +405,7 @@ func (c *Controller) executeNodeWithTryRun(ctx context.Context, tr *TryRun, node
 // fabricated as compliant. Fabricating "comply" for work that never ran would
 // silently fake compliance results.
 func (c *Controller) writePerTaskDecisions(ctx context.Context, tenantID, sessionID string, env map[string]any) {
-	schemaName := dbTenantSchema(tenantID)
-	quotedSchema := fmt.Sprintf(`"%s"`, schemaName)
+	quotedSchema := quoteIdentifier(dbTenantSchema(tenantID))
 
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf(
 		`SELECT task_id FROM %s.tasks WHERE session_id = $1`, quotedSchema,
@@ -524,6 +523,17 @@ func extractResultSummary(env map[string]any) string {
 
 func dbTenantSchema(tenantID string) string {
 	return "tenant_" + tenantID
+}
+
+// quoteIdentifier quotes name for use as a Postgres identifier. Embedded double
+// quotes are doubled so a tenant ID cannot close the quoted identifier and
+// inject SQL. Postgres identifiers cannot contain NUL, so anything from the
+// first NUL onward is dropped.
+func quoteIdentifier(name string) string {
+	if i := strings.IndexByte(name, 0); i >= 0 {
+		name = name[:i]
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 func markStopped(db *sql.DB, ctx context.Context, loopRunID, status, reason string) {
